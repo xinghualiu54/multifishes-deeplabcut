@@ -1,0 +1,83 @@
+import pandas as pd
+import numpy as np
+from scipy.signal import savgol_filter
+import matplotlib.pyplot as plt
+from pathlib import Path
+import glob
+
+# Define the function removeLowLikely which you might have missed including
+def removeLowLikely(data, threshold):
+    for column in data.columns.levels[0]:
+        likely_cols = [col for col in data[column].columns if 'likelihood' in col]
+        for col in likely_cols:
+            low_likely_mask = data[column][col] < threshold
+            data[column] = data[column][~low_likely_mask]
+    return data
+
+fps = 10
+boundary = 925
+px2cm = 50 / 200
+x_ROI_left = 0
+y_ROI_left = 0
+x_ROI_right = 0
+y_ROI_right = 0
+bodyparts = "a"
+summary = pd.DataFrame(columns=["file_name", "fps", "Distance_cm", "speed_cm/s", "in_center_Time_s", "in_center_Distance_cm", "number_crossings_into_center"])
+
+h5filePath = Path('F:/multifish/aa')
+h5file_list = list(h5filePath.glob("*.h5"))
+num_of_files = len(h5file_list)
+
+for videofile in h5file_list:
+    try:
+        h5_fname = str(videofile)
+        
+        data = pd.read_hdf(h5_fname)
+        data = data[data.keys()[0][0]]
+        pd.set_option('display.max_rows', 15)
+        totalTime = np.shape(data)[0] / fps
+        time = np.arange(data.shape[0]) / fps
+
+        nan_threshold = 0.9
+        data = removeLowLikely(data, nan_threshold)
+        #data = data.dropna(axis=0, how='any') 
+        data.ffill(inplace=True) 
+
+        individuals = ['individual1', 'individual2', 'individual3', 'individual4', 'individual5']
+        colors = ['xkcd:red', 'xkcd:blue', 'xkcd:pink', 'xkcd:light blue', 'xkcd:orange']
+
+        fig, ax = plt.subplots()
+
+        for i, individual in enumerate(individuals):
+            someX = data[individual][bodyparts].iloc[:, 0].values.astype(float)
+            someY = data[individual][bodyparts].iloc[:, 1].values.astype(float)
+            
+            someXSmooth = savgol_filter(someX, window_length=5, polyorder=2)
+            someYSmooth = savgol_filter(someY, window_length=5, polyorder=2)
+            
+            plt.plot(someXSmooth, someYSmooth, 'o', c=colors[i], markersize=2)
+            #plt.plot(someXSmooth, someYSmooth, '-', c=colors[i], linewidth=2)
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.invert_yaxis()
+        plt.title(h5_fname)
+        fig_path = os.path.join(h5filePath, f'{os.path.splitext(videofile)[0]}_figure.png')
+        fig.savefig(fig_path, bbox_inches='tight')
+           
+        plt.show()
+
+        dx1 = np.diff(someXSmooth)
+        dy1 = np.diff(someYSmooth)
+        
+        distanceSingle = np.sqrt(dx1**2 + dy1**2)
+        speedSingle = distanceSingle * fps
+        
+        distance = np.nansum(distanceSingle)
+        Distance = distance * px2cm
+        speed = Distance / totalTime
+        print(f'Distance={Distance:.3f} cm')
+        print(f'speed={speed:.3f} cm/s')
+
+    except Exception as e:
+        print(f"An exception occurred for {h5_fname}: {e}")
