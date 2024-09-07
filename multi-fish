@@ -1,0 +1,285 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
+rcParams.update({'font.size': 14})
+rcParams["figure.figsize"] = [12., 9.]
+rcParams['font.family'] = 'sans-serif'
+rcParams['font.sans-serif'] = ['Helvetica', 'DejaVu Sans']
+from scipy.signal import savgol_filter
+from scipy import interpolate
+pd.set_option('display.max_rows', 15)
+from pathlib import Path
+import cv2 
+import os
+from matplotlib import cm
+import csv
+from scipy.signal import savgol_filter
+import glob
+import math
+import datetime
+import numpy as np
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
+from shapely.geometry import Point
+from shapely.geometry.polygon import Polygon
+from shapely.geometry import Point, LineString, Polygon
+
+def removeLowLikely(data,nan_threshold):
+    #nan_threshold=0.5
+    for row in np.arange(np.shape(data)[0]):
+        for col_id in np.arange(int(np.shape(data)[1]/3)):
+            if data.iloc[row,col_id*3+2]<nan_threshold:
+                data.iloc[row,col_id*3]=np.nan
+                data.iloc[row,col_id*3+1]=np.nan
+    return data
+
+def smoothfunc(x,err,window):
+    smooth=savgol_filter(x, window, 5, mode='nearest')
+    for i in np.arange(len(smooth)):
+        if np.abs(smooth[i]-x[i])>err:
+            x[i]=x[i-1]
+    return savgol_filter(x, 51, 3, mode='nearest')
+
+def calcSpeed(bodypart):
+    someX=data[bodypart].iloc[:,0].values
+    
+   # ixFinite=np.isfinite(someX)
+    smooth=savgol_filter(someX, window_length=5, polyorder=2)
+    midX=900
+    ix_midX=np.argmin(abs(np.nan_to_num(smooth,nan=0)-midX))
+    diff=np.diff(someX)
+    plt.plot(someX,'o')
+    plt.plot(smooth,'*')
+    x=np.arange(ix_midX-int(0.2*len(data)),ix_midX+int(0.2*len(data)))
+    y=smooth[x]
+    z = np.polyfit(x, y, 1,full=True)
+    #z = np.polyfit(x, y, 1,full=False)
+    fit = np.poly1d(z[0])
+    print(f"fitting residual: {z[1][0]:{7}.{3}}")
+    plt.plot(x,fit(x),label="fit")
+    speed_x=-fit[1]*px2cm*fps
+    print(f"speed: {speed_x:{5}.{4}}")
+    #plt.show()
+
+def smoothFilter(someX):   
+    someX_sasvgol=savgol_filter(someX, window_length=5, polyorder=1)
+    ix=np.arange(len(someX))[~np.isnan(someX_sasvgol)]
+    tck = interpolate.splrep(ix, someX_sasvgol[ix], s=0)
+    xnew = np.arange(len(someX))
+    ynew = interpolate.splev(xnew, tck, der=0)
+    return np.arange(ix[0],ix[-1]), ynew[np.arange(ix[0],ix[-1])]
+
+
+
+def calc_stride(x): 
+    '''calculation of stride duration (in seconds) and stride length for a particular foot (in cm)
+    '''
+    #x=leftfront1_x
+    real2nanPos=np.zeros(10)
+    px_stride=np.zeros(10)  # pixle value of the feet position
+    loc=0
+    for i in np.arange(len(x)-1):
+        if ~np.isnan(x[i]) & np.isnan(x[i+1]):
+            real2nanPos[loc]=i
+            px_stride[loc]=x[i]
+            loc=loc+1
+
+    stride_idx=real2nanPos[np.nonzero(real2nanPos)]
+    stride_duration_average=np.average(np.diff(stride_idx))/fps
+    px_stride_nonzero=px_stride[np.nonzero(px_stride)]
+    px_stride_length=np.average(np.diff(px_stride_nonzero))*px2cm
+
+    selectRange=x[int(stride_idx[0]):int(stride_idx[-1])]
+    strideRatio=len(selectRange[~np.isnan(selectRange)])/len(selectRange)
+    return stride_duration_average, -px_stride_length, strideRatio
+
+def theta(A0,A1, B0, B1):
+    '''
+    vector A0->A1 and vector B0->B1
+
+    '''
+    A=A1-A0
+    B=B1-B0
+    cos=np.zeros(len(A))
+    dotproduct=np.zeros(len(A))
+    for i in np.arange(len(A)):
+        dotproduct[i]=A[i,:].dot(B[i,:])
+        cos[i]=dotproduct[i]/(np.linalg.norm(A[i,:])*np.linalg.norm(B[i,:]))
+
+    return np.arccos(cos)*180/np.pi
+
+def bodypartAve(bodypart,index,bdThreshold=0.8):    
+    #bodypart='leftfrontbw2'
+    bdlikely=data[bodypart].iloc[:,2]
+    bd=data[bodypart].iloc[:,index].values
+    bd[bdlikely<bdThreshold]=np.nan
+    return np.nanmean(bd)
+
+def analyze_mouse_movement(mouse_coords_dict, fps):
+    results_list = []
+    for mouse_name, coords in mouse_coords_dict.items():
+        distance = 0
+        for i in range(1, len(coords[0])):
+            dx = coords[0][i] - coords[0][i-1]
+            dy = coords[1][i] - coords[1][i-1]
+            distance += math.sqrt(dx**2 + dy**2)
+    
+        avg_speed = distance / (len(coords[0]) / fps)
+        
+        results_dict = {
+            "Mouse Name": mouse_name,
+            "Distance Traveled": distance,
+            "Average Speed": avg_speed
+        }
+        
+        results_list.append(results_dict)
+    
+    return results_list
+
+
+fps=10
+boundary=925
+px2cm=50/200
+x_ROI_left=0
+y_ROI_left=0
+x_ROI_right=0
+y_ROI_right=0
+bodyparts="nose"
+summary=pd.DataFrame(columns=["file_name", "fps", "Distance_cm", "speed_cm/s","in_center_Time_s", "in_center_Distance_cm","number_crossings_into_center"])
+
+h5filePath=Path('F:/multifish/aa')
+h5file_list=list(h5filePath.glob("*.h5"))
+#videofile_list=glob.glob(os.path.join(".","*.mp4"))
+num_of_files=len(h5file_list)
+for videofile in h5file_list:
+    try:
+        #videofile=videofile_list[2]
+        videofile_part1=str(videofile).replace(".mp4.mp4","")
+        #print(videofile_part1)
+        h5_fname=glob.glob(videofile_part1)[0]
+        
+        data=pd.read_hdf(h5_fname)
+        #data=pd.read_hdf('./gait_data/APP54 00_00_34-00_00_35DLC_resnet50_4Mar12shuffle1_1030000.h5')
+        data=data[data.keys()[0][0]]
+        pd.set_option('display.max_rows', 15)
+        totalTime=np.shape(data)[0]/fps
+        time=np.arange(data.shape[0])/fps
+        #likelyhoodAve=np.average(data.iloc[:,2:60:3].values,axis=1)
+        #likelyhoodAveSmooth=savgol_filter(likelyhoodAve, window_length=25, polyorder=2)
+       # data=data.iloc[likelyhoodAveSmooth>0.5,:]
+
+        nan_threshold=0.9
+        data=removeLowLikely(data,nan_threshold)
+        data=data.dropna(axis=0,how='any')   
+              
+        
+        someX1=data['individual1'][bodyparts].iloc[:,0].values.astype(float)
+        someY1=data['individual1'][bodyparts].iloc[:,1].values.astype(float)
+#someX=someX[data[bodypart].iloc[:,2].values>0.9]
+        #plt.plot(someX,'o',label="tailbase")
+        #ix,y=smoothFilter(someX)
+        someX2=data['individual2'][bodyparts].iloc[:,0].values.astype(float)
+        someY2=data['individual2'][bodyparts].iloc[:,1].values.astype(float)
+        
+        someX3=data['individual3'][bodyparts].iloc[:,0].values.astype(float)
+        someY3=data['individual3'][bodyparts].iloc[:,1].values.astype(float)
+        
+        someX4=data['individual4'][bodyparts].iloc[:,0].values.astype(float)
+        someY4=data['individual4'][bodyparts].iloc[:,1].values.astype(float)
+        
+        someX5=data['individual5'][bodyparts].iloc[:,0].values.astype(float)
+        someY5=data['individual5'][bodyparts].iloc[:,1].values.astype(float)
+        
+        #someX6=data['individual6'][bodyparts].iloc[:,0].values.astype(float)
+        #someY6=data['individual6'][bodyparts].iloc[:,1].values.astype(float)
+        
+      
+        
+        
+#someXSmooth=smoothFilter(someX)
+        someXSmooth1=savgol_filter(someX1, window_length=5, polyorder=2)  # window_length is the number of data points to choose for smoothing
+        someYSmooth1=savgol_filter(someY1, window_length=5, polyorder=2) # the larger the value is, the more smooth the curve is
+        
+        someXSmooth2=savgol_filter(someX2, window_length=5, polyorder=2)  
+        someYSmooth2=savgol_filter(someY2, window_length=5, polyorder=2) 
+        
+        someXSmooth3=savgol_filter(someX3, window_length=5, polyorder=2)  
+        someYSmooth3=savgol_filter(someY3, window_length=5, polyorder=2) 
+        
+        someXSmooth4=savgol_filter(someX4, window_length=5, polyorder=2)  
+        someYSmooth4=savgol_filter(someY4, window_length=5, polyorder=2)
+        
+        someXSmooth5=savgol_filter(someX5, window_length=5, polyorder=2)  
+        someYSmooth5=savgol_filter(someY5, window_length=5, polyorder=2)
+        
+        #someXSmooth6=savgol_filter(someX6, window_length=75, polyorder=2)  
+        #someYSmooth6=savgol_filter(someY6, window_length=75, polyorder=2)
+        
+        #fig, ax = plt.subplots()
+        plt.plot(someXSmooth1,someYSmooth1,'-',c='xkcd:red',linewidth=2)
+        plt.show()
+        
+        plt.plot(someXSmooth2,someYSmooth2,'-',c='xkcd:blue',linewidth=2)
+        plt.show()
+        plt.plot(someXSmooth3,someYSmooth3,'-',c='xkcd:pink',linewidth=2)
+        plt.show()
+        plt.plot(someXSmooth4,someYSmooth4,'-',c='xkcd:light blue',linewidth=2)
+        plt.show()
+        plt.plot(someXSmooth5,someYSmooth5,'-',c='xkcd:orange',linewidth=2)
+        plt.title(h5_fname)
+        plt.show()
+        
+        #plt.plot(someXSmooth6,someYSmooth6,'-',c='xkcd:orange')
+      
+        fig, ax = plt.subplots()
+        plt.plot(someXSmooth1,someYSmooth1,'o',c='xkcd:red', markersize=1)
+        
+        
+        plt.plot(someXSmooth2,someYSmooth2,'o',c='xkcd:blue', markersize=1)
+        
+        plt.plot(someXSmooth3,someYSmooth3,'o',c='xkcd:pink',markersize=1)
+        
+        plt.plot(someXSmooth4,someYSmooth4,'o',c='xkcd:light blue',markersize=1)
+        
+        plt.plot(someXSmooth5,someYSmooth5,'o',c='xkcd:orange',markersize=1)
+        fig_path = os.path.join(h5filePath, f'{os.path.splitext(videofile)[0]}_figure.png')
+        fig.savefig(fig_path, bbox_inches='tight')
+        plt.show()
+        
+
+        #plt.xlim([90, boundary])
+        #plt.ylim([0, boundary])
+        ax.set_xticks([])
+        ax.set_yticks([])
+        #plt.plot(learx_smooth,leary_smooth,'.')
+        #plt.title(h5_fname)
+        #plt.show()        
+        
+        
+        dx1=np.diff(someXSmooth1)
+        dy1=np.diff(someYSmooth1)
+       
+#单帧运动像素
+        distanceSingle=np.sqrt(dx1**2+dy1**2)
+#单帧运动速度？
+        speedSingle=distanceSingle*fps
+
+        
+        
+        #总距离
+        distance=np.nansum(distanceSingle)
+       
+#用imageJ查看像素点对应的距离（此处是45cm=387像素点）
+        Distance=distance*px2cm
+        speed=Distance/totalTime
+        print(f'Distance={Distance:.3f} cm')
+        print(f'speed={speed:.3f} cm/s')
+        
+       
+
+        
+      
+
+    except:
+            print("An exception occurred for"+h5_fname) 
